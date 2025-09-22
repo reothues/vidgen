@@ -1,0 +1,39 @@
+run:
+  name: baseline
+  output_dir: runs/baseline
+
+logging:
+  log_with: tensorboard
+  gradient_interval: 25
+
+dataset:
+  root: ENV:TRAINING_SET_LOCATION
+  frame_rate: 8
+  max_frames: 32
+  resolution: 512
+  cache_dir: data/cache
+
+model:
+  provider: animatediff
+  base_model: stabilityai/stable-diffusion-1-5
+  motion_lora: guoyww/animatediff-motion-lora-v1
+  dtype: bf16
+
+training:
+  seed: 1337
+  gradient_accumulation_steps: 4
+  batch_size: 2
+  learning_rate: 1.0e-4
+  max_train_steps: 1000
+  checkpoint_interval: 200
+  validation_interval: 400
+  mixed_precision: bf16
+  compile: false
+
+validation:
+  prompts:
+    - "A short loopable animation of a watercolor koi fish swimming in a pond"
+    - "A steampunk city skyline at sunset with airships"
+  num_frames: 16
+  guidance_scale: 7.5
+  num_inference_steps: 50

@@ -1,0 +1,175 @@
+Metadata-Version: 2.4
+Name: vidgen
+Version: 0.1.0
+Summary: Toolkit for fine-tuning video generative models such as AnimateDiff.
+Author: VidGen Team
+License: MIT
+Keywords: video,diffusion,training,fine-tuning
+Classifier: Development Status :: 3 - Alpha
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3.10
+Classifier: Programming Language :: Python :: 3.11
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+Requires-Dist: accelerate>=0.26
+Requires-Dist: diffusers[torch]>=0.24.0
+Requires-Dist: transformers>=4.38
+Requires-Dist: torch>=2.1
+Requires-Dist: torchvision>=0.16
+Requires-Dist: pydantic>=2.6
+Requires-Dist: python-dotenv>=1.0
+Requires-Dist: typer>=0.9
+Requires-Dist: rich>=13.7
+Requires-Dist: omegaconf>=2.3
+Requires-Dist: opencv-python>=4.9
+Requires-Dist: numpy>=1.26
+Requires-Dist: datasets>=2.16
+Requires-Dist: tqdm>=4.66
+Provides-Extra: dev
+Requires-Dist: pytest>=8.1; extra == "dev"
+Requires-Dist: ruff>=0.3; extra == "dev"
+Requires-Dist: mypy>=1.8; extra == "dev"
+
+# VidGen — Video Diffusion Fine‑Tuning Toolkit
+
+VidGen is a small, practical scaffold to fine‑tune video generative models (e.g., AnimateDiff on SD1.5 with motion LoRA). This repo gives you a clean starting point: environment setup, a CLI, config files, and space for datasets/models so you can iterate quickly.
+
+## Highlights
+- Minimal CLI to validate your setup and config
+- `.env` based dataset location resolution
+- Config‑driven runs via YAML
+- Make targets for install, lint, tests
+
+## Requirements
+- Tested on: Intel i9 Gen 10 + NVIDIA RTX 3080
+- OS: Linux recommended (CUDA support)
+- Python: 3.10+
+- Disk: training set accessible via local path or mounted NAS
+
+## Quickstart
+
+1) Set your dataset location and preparation settings in `.env` (root of this repo):
+
+```
+training_set_location = '/media/asg/My Book'
+vidgen_max_video_duration_seconds = 10
+vidgen_target_resolution = '512x512'
+vidgen_model_output_resolution = '512x512'
+vidgen_target_format = 'mp4'
+vidgen_prepared_dataset_subdir = 'processed'
+```
+
+2) Create a virtual environment and install (editable):
+
+```
+python -m venv vidgen-env
+./vidgen-env/bin/pip install --upgrade pip
+./vidgen-env/bin/pip install -e .[dev]
+```
+
+Alternatively with Make:
+
+```
+make install
+```
+
+3) Run a dry‑run to validate setup and config:
+
+```
+./vidgen-env/bin/python -m vidgen.cli train --config configs/default.yaml --dry-run
+```
+
+You should see confirmation of the resolved dataset root and the output directory being prepared. Remove `--dry-run` when you integrate the actual training loop.
+
+4) Prepare the dataset (dry run example):
+
+```
+./vidgen-env/bin/python -m vidgen.cli prepare-dataset --dry-run
+```
+
+Drop `--dry-run` to perform the conversions.
+
+## Project Layout
+- `src/vidgen/__init__.py` — package metadata
+- `src/vidgen/cli.py` — Typer CLI (`train` command)
+- `src/vidgen/utils/env.py` — `.env` loading and key normalization
+- `configs/default.yaml` — baseline run configuration
+- `Makefile` — install, lint, test, train helpers
+- `requirements.txt`, `pyproject.toml` — dependencies and packaging
+
+## Configuration
+The default config is in `configs/default.yaml`. Key fields:
+
+- `dataset.root`: may be a literal path or `ENV:TRAINING_SET_LOCATION` to pull from `.env`
+- `run.output_dir`: where run artifacts will be stored
+- `model.*`: placeholders for provider/base model/motion LoRA
+- `training.*`: typical training hyperparameters
+
+Example: configs/default.yaml
+
+```
+dataset:
+  root: ENV:TRAINING_SET_LOCATION
+run:
+  name: baseline
+  output_dir: runs/baseline
+```
+
+## CLI
+After installing, you can invoke the CLI:
+
+- Dry run (validate env + config):
+  - `./vidgen-env/bin/python -m vidgen.cli train --config configs/default.yaml --dry-run`
+
+- Prepare to train (scaffold only for now):
+  - `./vidgen-env/bin/python -m vidgen.cli train --config configs/default.yaml`
+
+- Prepare dataset (filters + resize + format):
+  - `./vidgen-env/bin/python -m vidgen.cli prepare-dataset --dry-run`
+  - Drop `--dry-run` to run the conversions.
+
+Tip: You can also add the venv to your PATH or use the generated console script `vidgen` (entry point in `pyproject.toml`).
+
+## Datasets
+The `.env` file now drives dataset preparation. Key fields:
+
+- `training_set_location`: root directory containing your raw videos
+- `vidgen_max_video_duration_seconds`: maximum clip length (seconds) to keep
+- `vidgen_target_resolution`: resolution to center-crop the dataset to (auto-aligned to model output)
+- `vidgen_model_output_resolution`: final resolution expected by the fine-tuned model
+- `vidgen_target_format`: container/extension for processed clips (e.g. `mp4`)
+- `vidgen_prepared_dataset_subdir`: relative folder under the input root for processed files
+- Optional: `vidgen_prep_recursive` (`true`/`false`) and `vidgen_prep_overwrite`
+
+Run the CLI to filter, resize, and transcode videos:
+
+```
+./vidgen-env/bin/python -m vidgen.cli prepare-dataset --dry-run
+```
+
+Remove `--dry-run` when you're ready to generate the processed dataset.
+
+## Models
+Planned integrations:
+- AnimateDiff (motion‑LoRA on SD1.5)
+- Additional providers as needed
+
+## Development
+- Lint and format: `./vidgen-env/bin/ruff check src tests && ./vidgen-env/bin/ruff format src tests`
+- Type check: `./vidgen-env/bin/mypy src`
+- Tests: `./vidgen-env/bin/pytest`
+
+You can also use:
+
+```
+make lint
+make test
+```
+
+## Notes
+- Some model weights may require accepting licenses on Hugging Face. Log in with `huggingface-cli login` if needed before training.
+- CUDA setup is required for efficient training; ensure the appropriate PyTorch + CUDA wheels are installed for your GPU.
+
+## Status
+This is a bootstrap scaffold. The CLI validates configuration and environment and prepares output directories. Swap in your training loop under `src/vidgen/cli.py` once datasets/models are wired up.

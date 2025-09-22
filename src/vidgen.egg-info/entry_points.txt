@@ -1,0 +1,2 @@
+[console_scripts]
+vidgen = vidgen.cli:app

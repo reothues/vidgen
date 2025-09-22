@@ -1,0 +1,14 @@
+README.md
+pyproject.toml
+src/vidgen/__init__.py
+src/vidgen/cli.py
+src/vidgen.egg-info/PKG-INFO
+src/vidgen.egg-info/SOURCES.txt
+src/vidgen.egg-info/dependency_links.txt
+src/vidgen.egg-info/entry_points.txt
+src/vidgen.egg-info/requires.txt
+src/vidgen.egg-info/top_level.txt
+src/vidgen/datasets/preparation.py
+src/vidgen/utils/__init__.py
+src/vidgen/utils/env.py
+tests/test_preparation.py
