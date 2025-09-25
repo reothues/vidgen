@@ -11,29 +11,33 @@ dataset:
   frame_rate: 8
   max_frames: 32
   resolution: 512
+  prompt: "A photo"
   cache_dir: data/cache
 
 model:
   provider: animatediff
-  base_model: stabilityai/stable-diffusion-1-5
-  motion_lora: guoyww/animatediff-motion-lora-v1
+  base_model: runwayml/stable-diffusion-v1-5
+  motion_lora: guoyww/animatediff-motion-lora-v1-5-3
   dtype: bf16
 
 training:
   seed: 1337
   gradient_accumulation_steps: 4
-  batch_size: 2
+  batch_size: 1
   learning_rate: 1.0e-4
   max_train_steps: 1000
   checkpoint_interval: 200
   validation_interval: 400
   mixed_precision: bf16
   compile: false
+  gradient_checkpointing: true
+  enable_xformers: false
+  vae_slicing: true
+  vae_tiling: false
 
 validation:
-  prompts:
-    - "A short loopable animation of a watercolor koi fish swimming in a pond"
-    - "A steampunk city skyline at sunset with airships"
+  inputs:
+    - init_frame: data/validation/initial_frame.png
   num_frames: 16
   guidance_scale: 7.5
   num_inference_steps: 50

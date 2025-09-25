@@ -66,6 +66,42 @@ def test_settings_from_env_defaults_to_model(monkeypatch, tmp_path):
     assert settings.model_output_width == 640
     assert settings.model_output_height == 360
 
+
+def test_probe_fallback_duration(monkeypatch, tmp_path):
+    from vidgen.datasets.preparation import probe_video, DatasetPreparationSettings, VideoMetadata
+
+    root = tmp_path / 'root'
+    root.mkdir()
+    clip = root / 'clip.webm'
+    clip.write_bytes(b'0')
+
+    settings = DatasetPreparationSettings(
+        input_root=root,
+        output_root=root,
+        max_duration_seconds=20,
+        target_width=128,
+        target_height=128,
+        target_format='mp4',
+    )
+
+    payload = {
+        'streams': [{
+            'width': 640,
+            'height': 360,
+        }],
+        'format': {'duration': '7.5'},
+    }
+
+    def fake_run(cmd, capture_output, check, text):
+        class Result:
+            stdout = __import__('json').dumps(payload)
+        return Result()
+
+    monkeypatch.setattr('vidgen.datasets.preparation.subprocess.run', fake_run)
+    metadata = probe_video(clip, settings)
+    assert metadata == VideoMetadata(duration=7.5, width=640, height=360)
+
+
 def test_gather_video_files_skips_processed(tmp_path):
     root = tmp_path / 'root'
     root.mkdir()

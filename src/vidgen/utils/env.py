@@ -24,6 +24,8 @@ def load_environment(env_file: Optional[Path] = None) -> None:
         "max_video_duration_seconds": "VIDGEN_MAX_VIDEO_DURATION_SECONDS",
         "max_video_length_seconds": "VIDGEN_MAX_VIDEO_DURATION_SECONDS",
         "vidgen_max_video_duration_seconds": "VIDGEN_MAX_VIDEO_DURATION_SECONDS",
+        "max_raw_duration_seconds": "VIDGEN_MAX_RAW_DURATION_SECONDS",
+        "vidgen_max_raw_duration_seconds": "VIDGEN_MAX_RAW_DURATION_SECONDS",
         "target_resolution": "VIDGEN_TARGET_RESOLUTION",
         "vidgen_target_resolution": "VIDGEN_TARGET_RESOLUTION",
         "target_format": "VIDGEN_TARGET_FORMAT",
@@ -32,6 +34,7 @@ def load_environment(env_file: Optional[Path] = None) -> None:
         "vidgen_prepared_dataset_subdir": "VIDGEN_PREPARED_DATASET_SUBDIR",
         "model_output_resolution": "VIDGEN_MODEL_OUTPUT_RESOLUTION",
         "vidgen_model_output_resolution": "VIDGEN_MODEL_OUTPUT_RESOLUTION",
+        "huggingface_hub_token": "HUGGINGFACE_HUB_TOKEN",
     }
     for lower, upper in pairs.items():
         if lower in os.environ and upper not in os.environ:
@@ -41,3 +44,12 @@ def load_environment(env_file: Optional[Path] = None) -> None:
 def get_training_root() -> Optional[Path]:
     path = os.environ.get("TRAINING_SET_LOCATION")
     return Path(path) if path else None
+
+
+def get_prepared_dataset_root() -> Optional[Path]:
+    """Return the expected location of the processed training dataset."""
+    base = get_training_root()
+    if base is None:
+        return None
+    subdir = os.environ.get("VIDGEN_PREPARED_DATASET_SUBDIR") or "processed"
+    return base / subdir

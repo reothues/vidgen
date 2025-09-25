@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import shlex
 import subprocess
@@ -22,6 +23,16 @@ SUPPORTED_VIDEO_EXTENSIONS: Tuple[str, ...] = (
     ".mpeg",
 )
 
+# Keep processed clips at the lowest FPS the fine-tuning pipeline can handle.
+FINE_TUNE_MIN_FRAME_RATE = 8
+DEFAULT_MAX_SEGMENT_DURATION = 5.0
+
+
+def _format_seconds(value: float) -> str:
+    formatted = f"{value:.3f}"
+    formatted = formatted.rstrip("0").rstrip(".")
+    return formatted or "0"
+
 
 @dataclass
 class DatasetPreparationSettings:
@@ -39,6 +50,7 @@ class DatasetPreparationSettings:
     overwrite: bool = False
     model_output_width: Optional[int] = None
     model_output_height: Optional[int] = None
+    max_raw_duration_seconds: Optional[float] = None
     console: Console = field(default_factory=Console)
 
     @property
@@ -59,15 +71,27 @@ class DatasetPreparationSettings:
         if not root.exists():
             raise ValueError(f"Input directory does not exist: {root}")
 
-        max_duration_raw = env.get("VIDGEN_MAX_VIDEO_DURATION_SECONDS") or env.get(
-            "VIDGEN_MAX_VIDEO_LENGTH_SECONDS"
+        max_duration_raw = (
+            env.get("VIDGEN_MAX_VIDEO_DURATION_SECONDS")
+            or env.get("VIDGEN_MAX_VIDEO_LENGTH_SECONDS")
+            or str(DEFAULT_MAX_SEGMENT_DURATION)
         )
-        if not max_duration_raw:
-            raise ValueError("Set VIDGEN_MAX_VIDEO_DURATION_SECONDS in your .env")
         try:
             max_duration = float(max_duration_raw)
         except ValueError as exc:  # pragma: no cover - defensive
             raise ValueError("VIDGEN_MAX_VIDEO_DURATION_SECONDS must be numeric") from exc
+        if max_duration <= 0:
+            raise ValueError("VIDGEN_MAX_VIDEO_DURATION_SECONDS must be greater than zero")
+
+        raw_duration_limit: Optional[float] = None
+        raw_duration_raw = env.get("VIDGEN_MAX_RAW_DURATION_SECONDS")
+        if raw_duration_raw:
+            try:
+                raw_duration_limit = float(raw_duration_raw)
+            except ValueError as exc:  # pragma: no cover - defensive
+                raise ValueError("VIDGEN_MAX_RAW_DURATION_SECONDS must be numeric") from exc
+            if raw_duration_limit <= 0:
+                raw_duration_limit = None
 
         model_resolution_raw = env.get("VIDGEN_MODEL_OUTPUT_RESOLUTION")
         resolution_raw = env.get("VIDGEN_TARGET_RESOLUTION") or model_resolution_raw
@@ -105,6 +129,7 @@ class DatasetPreparationSettings:
             input_root=root,
             output_root=output_path,
             max_duration_seconds=max_duration,
+            max_raw_duration_seconds=raw_duration_limit,
             target_width=width,
             target_height=height,
             target_format=fmt,
@@ -127,6 +152,37 @@ def parse_resolution(value: str) -> Tuple[int, int]:
     if width <= 0 or height <= 0:
         raise ValueError("Resolution must be positive non-zero integers")
     return width, height
+
+
+def _parse_duration_value(raw: object) -> Optional[float]:
+    """Convert ffprobe duration values (including timecode strings) into seconds."""
+    if raw is None:
+        return None
+    if isinstance(raw, (int, float)):
+        return float(raw)
+    if isinstance(raw, str):
+        value = raw.strip()
+        if not value or value.upper() == "N/A":
+            return None
+        try:
+            return float(value)
+        except ValueError:
+            parts = value.split(":")
+            if len(parts) == 3:
+                hours, minutes, seconds = parts
+            elif len(parts) == 2:
+                hours = "0"
+                minutes, seconds = parts
+            else:
+                return None
+            try:
+                h = float(hours)
+                m = float(minutes)
+                s = float(seconds)
+            except ValueError:
+                return None
+            return h * 3600 + m * 60 + s
+    return None
 
 
 @dataclass
@@ -163,6 +219,8 @@ def gather_video_files(settings: DatasetPreparationSettings) -> List[Path]:
     for item in iterator:
         if not item.is_file():
             continue
+        if item.name.startswith("._"):
+            continue
         if item.suffix.lower() not in SUPPORTED_VIDEO_EXTENSIONS:
             continue
         try:
@@ -175,28 +233,81 @@ def gather_video_files(settings: DatasetPreparationSettings) -> List[Path]:
 
 
 def probe_video(path: Path, settings: DatasetPreparationSettings) -> Optional[VideoMetadata]:
-    cmd = [
-        settings.ffprobe_binary,
-        "-v",
-        "error",
-        "-select_streams",
-        "v:0",
-        "-show_entries",
-        "stream=duration,width,height",
-        "-of",
-        "json",
-        str(path),
-    ]
-    try:
-        result = subprocess.run(cmd, capture_output=True, check=True, text=True)
-    except FileNotFoundError as exc:
-        raise RuntimeError("ffprobe not found. Install ffmpeg to continue.") from exc
-    except subprocess.CalledProcessError as exc:
-        settings.console.print(f"[yellow]Skipping {path}: unable to probe video ({exc.stderr.strip()})[/yellow]")
+    def build_command(*, force_matroska: bool, probe_boost: bool) -> List[str]:
+        cmd_parts = [settings.ffprobe_binary, "-v", "error"]
+        if probe_boost:
+            cmd_parts.extend(["-probesize", "200M", "-analyzeduration", "200M"])
+        if force_matroska:
+            cmd_parts.extend(["-f", "matroska,webm"])
+        cmd_parts.extend(
+            [
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=duration,width,height,tags:format=duration:format_tags=duration,DURATION:stream_tags=duration,DURATION",
+                "-of",
+                "json",
+                str(path),
+            ]
+        )
+        return cmd_parts
+
+    suffix = path.suffix.lower()
+    is_matroska_like = suffix in {".webm", ".mkv"}
+
+    attempts: List[Tuple[bool, bool]] = []
+    seen: set[Tuple[bool, bool]] = set()
+
+    def register(force_matroska: bool, probe_boost: bool) -> None:
+        key = (force_matroska, probe_boost)
+        if key not in seen:
+            attempts.append(key)
+            seen.add(key)
+
+    register(False, False)
+    if is_matroska_like:
+        register(True, False)
+    register(False, True)
+    if is_matroska_like:
+        register(True, True)
+
+    last_error: Optional[str] = None
+    success_stdout: Optional[str] = None
+
+    for force_matroska, probe_boost in attempts:
+        cmd = build_command(force_matroska=force_matroska, probe_boost=probe_boost)
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True)
+        except FileNotFoundError as exc:
+            raise RuntimeError("ffprobe not found. Install ffmpeg to continue.") from exc
+
+        if result.returncode == 0:
+            success_stdout = result.stdout
+            break
+
+        stderr = (result.stderr or "").strip()
+        last_error = stderr or None
+
+        lower_err = stderr.lower() if stderr else ""
+        if is_matroska_like and not force_matroska and "moov atom not found" in lower_err:
+            continue
+        if not probe_boost and "invalid data found" in lower_err:
+            continue
+    else:
+        message = last_error or "unknown ffprobe error"
+        settings.console.print(f"[yellow]Skipping {path}: unable to probe video ({message})[/yellow]")
         return None
 
+    if success_stdout is None:
+        settings.console.print(
+            f"[yellow]Skipping {path}: unable to probe video (ffprobe produced no output)[/yellow]"
+        )
+        return None
+
+    stdout_payload = success_stdout
+
     try:
-        payload = json.loads(result.stdout)
+        payload = json.loads(stdout_payload)
     except json.JSONDecodeError:
         settings.console.print(f"[yellow]Skipping {path}: ffprobe returned invalid JSON[/yellow]")
         return None
@@ -207,11 +318,20 @@ def probe_video(path: Path, settings: DatasetPreparationSettings) -> Optional[Vi
         return None
 
     stream = streams[0]
-    duration = stream.get("duration")
-    try:
-        duration_f = float(duration) if duration is not None else None
-    except (TypeError, ValueError):
-        duration_f = None
+    duration_f = _parse_duration_value(stream.get("duration"))
+    if duration_f is None:
+        duration_f = _parse_duration_value((stream.get("tags") or {}).get("duration"))
+    if duration_f is None:
+        duration_f = _parse_duration_value((stream.get("tags") or {}).get("DURATION"))
+
+    if duration_f is None:
+        format_block = payload.get("format") or {}
+        duration_f = _parse_duration_value(format_block.get("duration"))
+        if duration_f is None:
+            format_tags = format_block.get("tags") or {}
+            duration_f = _parse_duration_value(format_tags.get("duration"))
+            if duration_f is None:
+                duration_f = _parse_duration_value(format_tags.get("DURATION"))
 
     if duration_f is None:
         settings.console.print(f"[yellow]Skipping {path}: missing duration metadata[/yellow]")
@@ -228,6 +348,9 @@ def build_ffmpeg_command(
     destination: Path,
     settings: DatasetPreparationSettings,
     _metadata: VideoMetadata,
+    *,
+    start_time: Optional[float] = None,
+    duration: Optional[float] = None,
 ) -> List[str]:
     width, height = settings.target_resolution
     aspect_ratio = f'{width}/{height}'
@@ -236,7 +359,7 @@ def build_ffmpeg_command(
         f":'if(gt(a,{aspect_ratio}),{height},{width}/a)'"
         f':flags=lanczos'
     )
-    vf_steps = [scale_filter, f'crop={width}:{height}']
+    vf_steps = [scale_filter, f'crop={width}:{height}', f'fps={FINE_TUNE_MIN_FRAME_RATE}']
     video_args = ["-vf", ",".join(vf_steps)]
 
     fmt = settings.target_format
@@ -253,17 +376,18 @@ def build_ffmpeg_command(
         audio_args = ["-c:a", "aac", "-b:a", "192k"]
         container_args = []
 
-    base_cmd = [
-        settings.ffmpeg_binary,
-        "-y",
-        "-i",
-        str(source),
+    base_cmd: List[str] = [settings.ffmpeg_binary, "-y", "-i", str(source)]
+    if start_time is not None and start_time > 0:
+        base_cmd.extend(["-ss", _format_seconds(start_time)])
+    if duration is not None and duration > 0:
+        base_cmd.extend(["-t", _format_seconds(duration)])
+    base_cmd.extend([
         *video_args,
         *codec_args,
         *audio_args,
         *container_args,
         str(destination),
-    ]
+    ])
     return base_cmd
 
 
@@ -291,35 +415,91 @@ def prepare_dataset(
             summary.skipped.append((video, "metadata"))
             continue
 
-        if metadata.duration > settings.max_duration_seconds:
-            summary.skipped.append((video, f"duration {metadata.duration:.2f}s exceeds limit"))
+        max_raw_duration = settings.max_raw_duration_seconds
+        if max_raw_duration is not None and metadata.duration > max_raw_duration:
+            summary.skipped.append(
+                (
+                    video,
+                    f"duration {metadata.duration:.2f}s exceeds raw limit {max_raw_duration:.2f}s",
+                )
+            )
             continue
 
         rel_path = video.relative_to(settings.input_root)
-        destination = settings.output_root / rel_path
-        destination = destination.with_suffix(f".{settings.target_format}")
-        destination.parent.mkdir(parents=True, exist_ok=True)
+        base_destination = settings.output_root / rel_path
+        base_destination = base_destination.with_suffix(f".{settings.target_format}")
 
-        if destination.exists() and not settings.overwrite:
-            summary.skipped.append((video, "already processed"))
+        segment_duration = settings.max_duration_seconds
+        if segment_duration <= 0:
+            segment_duration = metadata.duration
+
+        needs_segmentation = metadata.duration > segment_duration and segment_duration > 0
+        if not needs_segmentation:
+            segment_count = 1
+        else:
+            segment_count = max(1, math.ceil(metadata.duration / segment_duration))
+
+        segments: List[Tuple[Path, Optional[float], Optional[float], int]] = []
+
+        for idx in range(segment_count):
+            start_time = idx * segment_duration if needs_segmentation else 0.0
+            if start_time >= metadata.duration:
+                break
+
+            clip_duration = None
+            if needs_segmentation:
+                remaining = max(0.0, metadata.duration - start_time)
+                clip_duration = min(segment_duration, remaining)
+                if clip_duration <= 0.01:
+                    continue
+
+            if segment_count == 1:
+                destination = base_destination
+            else:
+                stem = f"{base_destination.stem}_part{idx + 1:02d}"
+                destination = base_destination.with_name(f"{stem}{base_destination.suffix}")
+
+            if destination.exists() and not settings.overwrite:
+                summary.skipped.append((destination, "already processed"))
+                continue
+
+            segments.append((destination, start_time if needs_segmentation else None, clip_duration, idx))
+
+        if not segments:
             continue
 
         if dry_run:
+            for destination, _, _, _ in segments:
+                summary.processed.append((video, destination))
+            continue
+
+        for destination, start_time, clip_duration, segment_index in segments:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+
+            cmd = build_ffmpeg_command(
+                video,
+                destination,
+                settings,
+                metadata,
+                start_time=start_time,
+                duration=clip_duration,
+            )
+            try:
+                result = run_fn(cmd)
+            except FileNotFoundError as exc:
+                raise RuntimeError("ffmpeg not found. Install ffmpeg to continue.") from exc
+
+            if isinstance(result, subprocess.CompletedProcess) and result.returncode != 0:
+                stderr = (result.stderr or "").strip()
+                reason = stderr or "ffmpeg returned non-zero status"
+                summary.failed.append((destination, f"segment {segment_index + 1}: {reason}"))
+                continue
+
+            if not destination.exists():
+                summary.failed.append((destination, "ffmpeg reported success but output is missing"))
+                continue
+
             summary.processed.append((video, destination))
-            continue
-
-        cmd = build_ffmpeg_command(video, destination, settings, metadata)
-        try:
-            result = run_fn(cmd)
-        except FileNotFoundError as exc:
-            raise RuntimeError("ffmpeg not found. Install ffmpeg to continue.") from exc
-
-        if isinstance(result, subprocess.CompletedProcess) and result.returncode != 0:
-            stderr = (result.stderr or "").strip()
-            summary.failed.append((video, stderr or "ffmpeg returned non-zero status"))
-            continue
-
-        summary.processed.append((video, destination))
 
     return summary
 

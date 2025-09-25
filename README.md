@@ -47,7 +47,7 @@ make install
 ./vidgen-env/bin/python -m vidgen.cli train --config configs/default.yaml --dry-run
 ```
 
-You should see confirmation of the resolved dataset root and the output directory being prepared. Remove `--dry-run` when you integrate the actual training loop.
+You should see confirmation of the resolved dataset root (pointing at the processed subset) and the output directory being prepared. Drop `--dry-run` to launch training once everything looks correct.
 
 4) Prepare the dataset (dry run example):
 
@@ -89,7 +89,7 @@ After installing, you can invoke the CLI:
 - Dry run (validate env + config):
   - `./vidgen-env/bin/python -m vidgen.cli train --config configs/default.yaml --dry-run`
 
-- Prepare to train (scaffold only for now):
+- Fine-tune AnimateDiff (runs Accelerate + Diffusers training):
   - `./vidgen-env/bin/python -m vidgen.cli train --config configs/default.yaml`
 
 - Prepare dataset (filters + resize + format):
@@ -117,10 +117,22 @@ Run the CLI to filter, resize, and transcode videos:
 
 Remove `--dry-run` when you're ready to generate the processed dataset.
 
+## AnimateDiff Training
+The `train` command now instantiates an Accelerate-backed fine-tuning loop for AnimateDiff on top of the base Stable Diffusion weights and motion module specified in `model.*`.
+
+- The dataset loader expects processed videos under `<TRAINING_SET_LOCATION>/<VIDGEN_PREPARED_DATASET_SUBDIR>` (defaults to `processed/`) and preserves the original folder hierarchy.
+- `training.batch_size` is per-device; the effective batch is `batch_size * gradient_accumulation_steps * num_devices`.
+- For lower-memory GPUs you can set `training.gradient_checkpointing: true`, keep `training.batch_size: 1`, and leave `training.vae_slicing: true` to reduce the VRAM footprint.
+- Optional: `training.enable_xformers: true` (requires xFormers install) further trims memory usage by swapping in memory-efficient attention.
+- Checkpoints are written via `accelerator.save_state` every `training.checkpoint_interval` steps if provided. The final fine-tuned pipeline is exported to `<output_dir>/pipeline/`.
+- Validation hooks accept optional `inputs` with `init_frame` paths, ready for future image-to-video sampling integration.
+
+Ensure you have the required Hugging Face weights downloaded ahead of time (login if necessary with `huggingface-cli login`) and that PyTorch is built with CUDA enabled for GPU training.
+
 ## Models
-Planned integrations:
+Currently implemented:
 - AnimateDiff (motion‑LoRA on SD1.5)
-- Additional providers as needed
+Future work will add additional providers as needed.
 
 ## Development
 - Lint and format: `./vidgen-env/bin/ruff check src tests && ./vidgen-env/bin/ruff format src tests`
@@ -139,4 +151,4 @@ make test
 - CUDA setup is required for efficient training; ensure the appropriate PyTorch + CUDA wheels are installed for your GPU.
 
 ## Status
-This is a bootstrap scaffold. The CLI validates configuration and environment and prepares output directories. Swap in your training loop under `src/vidgen/cli.py` once datasets/models are wired up.
+AnimateDiff fine-tuning is now wired up end-to-end: the CLI validates configuration, resolves the processed dataset location, and launches a working training loop.

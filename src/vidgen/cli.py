@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import sys
 import os
 from pathlib import Path
 from typing import Optional
@@ -15,7 +14,8 @@ from .datasets.preparation import (
     DatasetPreparationSettings,
     prepare_dataset as run_dataset_preparation,
 )
-from .utils.env import load_environment, get_training_root
+from .utils.env import load_environment, get_training_root, get_prepared_dataset_root
+from .training.runner import run_training
 
 app = typer.Typer(help="VidGen CLI: train and manage fine-tuning runs.")
 
@@ -43,15 +43,20 @@ def train(
     cfg = OmegaConf.load(config)
 
     # Resolve dataset root from ENV:VAR indirection if used
-    dataset_root = cfg.get("dataset", {}).get("root")
-    if isinstance(dataset_root, str) and dataset_root.startswith("ENV:"):
-        env_key = dataset_root.split(":", 1)[1]
-        resolved = (get_training_root() if env_key == "TRAINING_SET_LOCATION" else Path(typer.get_app_dir("vidgen")))
-        dataset_root = resolved
+    dataset_root_value = cfg.get("dataset", {}).get("root")
+    dataset_root: Optional[Path]
+    if isinstance(dataset_root_value, str) and dataset_root_value.startswith("ENV:"):
+        env_key = dataset_root_value.split(":", 1)[1]
+        if env_key == "TRAINING_SET_LOCATION":
+            dataset_root = get_prepared_dataset_root() or get_training_root()
+        else:
+            dataset_root = Path(typer.get_app_dir("vidgen"))
+    elif dataset_root_value:
+        dataset_root = Path(dataset_root_value)
     else:
-        dataset_root = Path(dataset_root) if dataset_root else get_training_root()
+        dataset_root = get_prepared_dataset_root() or get_training_root()
 
-    if not dataset_root or not Path(dataset_root).exists():
+    if not dataset_root or not dataset_root.exists():
         print(Panel.fit(
             f"[red]Dataset root not found[/red]\nExpected at: [bold]{dataset_root}[/bold]\n\n"
             "Set TRAINING_SET_LOCATION in .env or config.dataset.root.",
@@ -62,7 +67,7 @@ def train(
     out_dir = Path(cfg.get("run", {}).get("output_dir", "runs/exp"))
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    print(Panel.fit(
+    panel = Panel.fit(
         "\n".join([
             "[green]VidGen setup validated[/green]",
             f"Config: [bold]{config}[/bold]",
@@ -71,13 +76,31 @@ def train(
             f"Mode: {'dry-run' if dry_run else 'train'}",
         ]),
         title="VidGen Train",
-    ))
+    )
+    print(panel)
 
     # Placeholder: integrate actual training here.
     if dry_run:
         return
 
-    print("Starting training loop (not yet implemented)...")
+    console = Console()
+    console.log("Initialising training components")
+
+    config_dict = OmegaConf.to_container(cfg, resolve=True)
+    if isinstance(config_dict, dict):
+        dataset_cfg = config_dict.setdefault("dataset", {})
+        dataset_cfg["root"] = str(dataset_root)
+        run_cfg = config_dict.setdefault("run", {})
+        run_cfg["output_dir"] = str(out_dir)
+
+        training_cfg = config_dict.setdefault("training", {})
+        training_cfg.setdefault("max_train_steps", 100)
+
+    run_training(
+        config=config_dict if isinstance(config_dict, dict) else {},
+        output_dir=out_dir,
+        console=console,
+    )
 
 
 @app.command('prepare-dataset')
